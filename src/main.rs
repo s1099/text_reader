@@ -1,6 +1,7 @@
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{ActiveTheme, IconName, Root, Sizable};
 use std::path::PathBuf;
@@ -332,17 +333,17 @@ impl Render for TextEditor {
                             .mb_4()
                             .text_xl()
                             .font_weight(FontWeight::BOLD)
-                            .child("Large File Viewer"),
+                            .child("File Viewer"),
                     )
                     .child(
                         div()
-                            .child("Open any file with File → Open File…")
+                            .child("Open file with File → Open File…")
                             .mb_2(),
                     )
                     .child(div().child("• Files of any size are supported via memory-mapping").mb_1())
                     .child(div().child("• A sparse line index is built in the background").mb_1())
                     .child(div().child("• Only the visible lines are ever decoded").mb_1())
-                    .child(div().child("• Arrow / Page-Up/Dn / Home / End to navigate").mb_1())
+                    .child(div().child("• Arrow / Page-Up/Dn / Home / End to navigate (broken)").mb_1())
                     .into_any(),
 
                 TabContent::Error(msg) => {
@@ -361,6 +362,7 @@ impl Render for TextEditor {
                     let mmap_arc = Arc::clone(&mf.mmap);
                     let index_arc = Arc::clone(&mf.index);
                     let scroll_handle = tab.scroll_handle.clone();
+                    let scroll_handle_bar = scroll_handle.clone();
 
                     // Gutter color: same foreground at reduced alpha.
                     let mut gutter_color = cx.theme().foreground;
@@ -370,6 +372,7 @@ impl Render for TextEditor {
                         .id("content-area")
                         .flex_1()
                         .overflow_hidden()
+                        .relative()
                         .track_focus(&self.focus_handle)
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, _w, cx| {
                             match event.keystroke.key.as_str() {
@@ -403,6 +406,7 @@ impl Render for TextEditor {
                                                 .flex_row()
                                                 .font_family("monospace")
                                                 .text_sm()
+                                                .whitespace_nowrap()
                                                 .child(
                                                     div()
                                                         .flex_shrink_0()
@@ -412,18 +416,22 @@ impl Render for TextEditor {
                                                         .text_color(gutter_color)
                                                         .child(format!("{ln}")),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .overflow_x_hidden()
-                                                        .child(line),
-                                                )
+                                                .child(div().child(line))
                                         })
                                         .collect()
                                 },
                             )
                             .track_scroll(scroll_handle)
                             .size_full(),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .child(Scrollbar::new(&scroll_handle_bar)),
                         )
                         .into_any()
                 }
@@ -461,7 +469,7 @@ impl Render for TextEditor {
                         )
                     }
                 }
-                TabContent::Welcome => "Large File Viewer — open a file to begin".to_string(),
+                TabContent::Welcome => "File Viewer | open a file to begin".to_string(),
                 TabContent::Error(_) => "Error".to_string(),
             }
         };
