@@ -368,6 +368,10 @@ impl Render for TextEditor {
                     let mut gutter_color = cx.theme().foreground;
                     gutter_color.a *= 0.4;
 
+
+                    let num_digits = total_lines.max(1).to_string().len().max(2);
+                    let gutter_width = px(num_digits as f32 * 8.5 + 10.0);
+
                     div()
                         .id("content-area")
                         .flex_1()
@@ -410,7 +414,7 @@ impl Render for TextEditor {
                                                 .child(
                                                     div()
                                                         .flex_shrink_0()
-                                                        .w(px(60.0))
+                                                        .w(gutter_width)
                                                         .pr_3()
                                                         .text_right()
                                                         .text_color(gutter_color)

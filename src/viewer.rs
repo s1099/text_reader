@@ -51,16 +51,8 @@ pub struct MappedFile {
 
 impl MappedFile {
     /// Memory-map `path` and return a `MappedFile` ready for indexing.
-    /// Returns an error for empty files (mmap requires non-zero length).
     pub fn open(path: PathBuf) -> std::io::Result<Self> {
         let file = std::fs::File::open(&path)?;
-        let meta = file.metadata()?;
-        if meta.len() == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "file is empty",
-            ));
-        }
         let mmap = unsafe { Mmap::map(&file)? };
         Ok(Self {
             path,
