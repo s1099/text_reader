@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod viewer;
-use viewer::{get_lines, MappedFile};
+use viewer::{MappedFile, get_lines};
 
 // ─── Tab state ────────────────────────────────────────────────────────────────
 
@@ -125,12 +125,9 @@ impl TextEditor {
                         cx.background_executor()
                             .timer(Duration::from_millis(250))
                             .await;
-                        let complete =
-                            index_arc.read().map(|i| i.complete).unwrap_or(true);
+                        let complete = index_arc.read().map(|i| i.complete).unwrap_or(true);
                         let Some(entity) = weak.upgrade() else { break };
-                        if cx.update_entity(&entity, |_, ctx| ctx.notify()).is_err()
-                            || complete
-                        {
+                        if cx.update_entity(&entity, |_, ctx| ctx.notify()).is_err() || complete {
                             break;
                         }
                     }
@@ -161,8 +158,10 @@ impl TextEditor {
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.tabs.len() > 1 {
             self.tabs.remove(index);
-            if self.active_tab >= self.tabs.len() {
-                self.active_tab = self.tabs.len() - 1;
+            if self.active_tab == index {
+                self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            } else if self.active_tab > index {
+                self.active_tab -= 1;
             }
             cx.notify();
         }
@@ -173,10 +172,18 @@ impl TextEditor {
 
 impl Render for TextEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len().saturating_sub(1);
+        }
         let active = self.active_tab;
 
         // Auto-focus the viewport when a new file tab is first rendered.
-        if self.tabs.get(active).map(|t| t.needs_focus).unwrap_or(false) {
+        if self
+            .tabs
+            .get(active)
+            .map(|t| t.needs_focus)
+            .unwrap_or(false)
+        {
             if let Some(tab) = self.tabs.get_mut(active) {
                 tab.needs_focus = false;
             }
@@ -195,25 +202,23 @@ impl Render for TextEditor {
             .dropdown_menu(move |menu, _, _| {
                 let w_new = weak_new.clone();
                 let w_open = weak_open.clone();
-                menu.item(
-                    PopupMenuItem::new("New Tab")
-                        .icon(IconName::File)
-                        .on_click(move |_, _, cx| {
-                            w_new
-                                .update(cx, |view, cx| {
-                                    let idx = view.tabs.len() + 1;
-                                    view.tabs.push(TabEntry {
-                                        title: format!("Untitled {idx}"),
-                                        content: TabContent::Welcome,
-                                        scroll_handle: UniformListScrollHandle::new(),
-                                        needs_focus: false,
-                                    });
-                                    view.active_tab = view.tabs.len() - 1;
-                                    cx.notify();
-                                })
-                                .ok();
-                        }),
-                )
+                menu.item(PopupMenuItem::new("New Tab").icon(IconName::File).on_click(
+                    move |_, _, cx| {
+                        w_new
+                            .update(cx, |view, cx| {
+                                let idx = view.tabs.len() + 1;
+                                view.tabs.push(TabEntry {
+                                    title: format!("Untitled {idx}"),
+                                    content: TabContent::Welcome,
+                                    scroll_handle: UniformListScrollHandle::new(),
+                                    needs_focus: false,
+                                });
+                                view.active_tab = view.tabs.len() - 1;
+                                cx.notify();
+                            })
+                            .ok();
+                    },
+                ))
                 .item(
                     PopupMenuItem::new("Open File...")
                         .icon(IconName::FolderOpen)
@@ -239,13 +244,17 @@ impl Render for TextEditor {
             .label("Edit")
             .ghost()
             .dropdown_menu(|menu, _, _| {
-                menu.item(PopupMenuItem::new("Copy").icon(IconName::Copy).disabled(true))
-                    .separator()
-                    .item(
-                        PopupMenuItem::new("Find")
-                            .icon(IconName::Search)
-                            .disabled(true),
-                    )
+                menu.item(
+                    PopupMenuItem::new("Copy")
+                        .icon(IconName::Copy)
+                        .disabled(true),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Find")
+                        .icon(IconName::Search)
+                        .disabled(true),
+                )
             });
 
         let view_menu = Button::new("view-menu-btn")
@@ -295,26 +304,30 @@ impl Render for TextEditor {
             .iter()
             .enumerate()
             .map(|(i, tab)| {
-                Tab::new()
-                    .label(tab.title.clone())
-                    .suffix(
-                        Button::new(ElementId::Integer(i as u64 + 1000))
-                            .ghost()
-                            .xsmall()
-                            .label("×")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.close_tab(i, cx);
-                            })),
-                    )
+                Tab::new().label(tab.title.clone()).suffix(
+                    Button::new(ElementId::Integer(i as u64 + 1000))
+                        .ghost()
+                        .xsmall()
+                        .label("×")
+                        // TODO: Add icon, .icon isn't visible for some reason
+                        // .icon(
+                        //     Icon::new(IconName::Close)
+                        //         .text_color(cx.theme().primary)
+                        // )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.close_tab(i, cx);
+                        })),
+                )
             })
             .collect();
 
         let tab_bar = TabBar::new("main-tabs")
-            .underline()
             .selected_index(active)
             .on_click(cx.listener(|this, ix: &usize, _window, cx| {
-                this.active_tab = *ix;
-                cx.notify();
+                if *ix < this.tabs.len() {
+                    this.active_tab = *ix;
+                    cx.notify();
+                }
             }))
             .children(tabs);
 
@@ -335,15 +348,27 @@ impl Render for TextEditor {
                             .font_weight(FontWeight::BOLD)
                             .child("File Viewer"),
                     )
+                    .child(div().child("Open file with File → Open File…").mb_2())
                     .child(
                         div()
-                            .child("Open file with File → Open File…")
-                            .mb_2(),
+                            .child("• Files of any size are supported via memory-mapping")
+                            .mb_1(),
                     )
-                    .child(div().child("• Files of any size are supported via memory-mapping").mb_1())
-                    .child(div().child("• A sparse line index is built in the background").mb_1())
-                    .child(div().child("• Only the visible lines are ever decoded").mb_1())
-                    .child(div().child("• Arrow / Page-Up/Dn / Home / End to navigate (broken)").mb_1())
+                    .child(
+                        div()
+                            .child("• A sparse line index is built in the background")
+                            .mb_1(),
+                    )
+                    .child(
+                        div()
+                            .child("• Only the visible lines are ever decoded")
+                            .mb_1(),
+                    )
+                    .child(
+                        div()
+                            .child("• Arrow / Page-Up/Dn / Home / End to navigate (broken)")
+                            .mb_1(),
+                    )
                     .into_any(),
 
                 TabContent::Error(msg) => {
@@ -367,7 +392,6 @@ impl Render for TextEditor {
                     // Gutter color: same foreground at reduced alpha.
                     let mut gutter_color = cx.theme().foreground;
                     gutter_color.a *= 0.4;
-
 
                     let num_digits = total_lines.max(1).to_string().len().max(2);
                     let gutter_width = px(num_digits as f32 * 8.5 + 10.0);
@@ -447,8 +471,7 @@ impl Render for TextEditor {
             let tab = &self.tabs[active];
             match &tab.content {
                 TabContent::File(mf) => {
-                    let top_line =
-                        tab.scroll_handle.0.borrow().base_handle.top_item() + 1;
+                    let top_line = tab.scroll_handle.0.borrow().base_handle.top_item() + 1;
                     let total = mf.total_lines();
                     let size_str = format_file_size(mf.file_size());
 
