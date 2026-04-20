@@ -1,15 +1,23 @@
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::tab::{Tab, TabBar};
-use gpui_component::{ActiveTheme, IconName, Root, Sizable};
+use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable};
+use gpui_component_assets::Assets;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+mod find;
 mod viewer;
+use find::{FindState, Match, search_in_mmap, slice_for_line_range};
 use viewer::{MappedFile, get_lines};
+
+// ─── Actions ──────────────────────────────────────────────────────────────────
+
+actions!(text_editor, [Find, FindClose, FindPrev]);
 
 // ─── Tab state ────────────────────────────────────────────────────────────────
 
@@ -34,6 +42,8 @@ struct TextEditor {
     focus_handle: FocusHandle,
     tabs: Vec<TabEntry>,
     active_tab: usize,
+    /// Find bar; `None` when hidden. Bound to whatever tab was active when opened.
+    find: Option<FindState>,
     /// Background tasks must be held alive (dropping a Task cancels it).
     _tasks: Vec<Task<()>>,
 }
@@ -49,6 +59,7 @@ impl TextEditor {
                 needs_focus: true,
             }],
             active_tab: 0,
+            find: None,
             _tasks: vec![],
         }
     }
@@ -195,8 +206,347 @@ impl TextEditor {
         } else if self.active_tab > index {
             self.active_tab -= 1;
         }
+        // Close find when its owning tab disappears.
+        if let Some(find) = &self.find {
+            if find.tab_index >= self.tabs.len()
+                || !matches!(self.tabs[find.tab_index].content, TabContent::File(_))
+            {
+                self.find = None;
+            }
+        }
         cx.notify();
     }
+
+    // ── Find feature ──────────────────────────────────────────────────────────
+
+    /// Ctrl+F: toggle the find bar for the active tab.
+    ///
+    /// If already open and bound to this tab, just refocus the input and
+    /// select its contents (matches VS Code's behavior on repeated Ctrl+F).
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.active_tab;
+        if !matches!(
+            self.tabs.get(active).map(|t| &t.content),
+            Some(TabContent::File(_))
+        ) {
+            return;
+        }
+
+        if let Some(find) = self.find.as_mut() {
+            if find.tab_index == active {
+                let input = find.query_input.clone();
+                input.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                });
+                return;
+            }
+        }
+
+        let query_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Find")
+                .default_value("")
+        });
+
+        let subscription = cx.subscribe_in(
+            &query_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.kick_off_search(cx);
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.find_next(window, cx);
+                }
+                _ => {}
+            },
+        );
+
+        query_input.update(cx, |state, cx| state.focus(window, cx));
+
+        self.find = Some(FindState {
+            query_input,
+            case_sensitive: false,
+            matches: Arc::new(RwLock::new(Vec::new())),
+            current: 0,
+            tab_index: active,
+            last_query: String::new(),
+            search_gen: 0,
+            pending_scroll: false,
+            _subscription: Some(subscription),
+            _search_task: None,
+        });
+
+        cx.notify();
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_some() {
+            // Return focus to the file viewport so keyboard scrolling works again.
+            self.focus_handle.focus(window);
+            cx.notify();
+        }
+    }
+
+    /// Spawn a background search for the current query/case flag. Previous
+    /// task (if any) is dropped, and stale completions are filtered using
+    /// `search_gen`.
+    fn kick_off_search(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let active = find.tab_index;
+        let mmap = match self.tabs.get(active).map(|t| &t.content) {
+            Some(TabContent::File(mf)) => Arc::clone(&mf.mmap),
+            _ => return,
+        };
+        let query = find.query_input.read(cx).value().to_string();
+        let case_insensitive = !find.case_sensitive;
+
+        if query == find.last_query {
+            return;
+        }
+        find.last_query = query.clone();
+        find.search_gen += 1;
+        let current_gen = find.search_gen;
+        let results_arc = Arc::clone(&find.matches);
+
+        if query.is_empty() {
+            if let Ok(mut w) = results_arc.write() {
+                w.clear();
+            }
+            find.current = 0;
+            find._search_task = None;
+            cx.notify();
+            return;
+        }
+
+        let task = cx.spawn(async move |weak, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move { search_in_mmap(&mmap, &query, case_insensitive) })
+                .await;
+
+            let Some(entity) = weak.upgrade() else { return };
+            let _ = cx.update_entity(&entity, |this, cx| {
+                let Some(find) = this.find.as_mut() else {
+                    return;
+                };
+                if find.search_gen != current_gen {
+                    return; // a newer search started while we were working
+                }
+                if let Ok(mut w) = results_arc.write() {
+                    *w = results;
+                }
+                find.current = 0;
+                find.pending_scroll = true;
+                find._search_task = None;
+                cx.notify();
+            });
+        });
+        find._search_task = Some(task);
+    }
+
+    fn find_next(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let n = find.match_count();
+        if n == 0 {
+            return;
+        }
+        find.current = (find.current + 1) % n;
+        find.pending_scroll = true;
+        cx.notify();
+    }
+
+    fn find_prev(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let n = find.match_count();
+        if n == 0 {
+            return;
+        }
+        find.current = if find.current == 0 {
+            n - 1
+        } else {
+            find.current - 1
+        };
+        find.pending_scroll = true;
+        cx.notify();
+    }
+
+    fn toggle_find_case(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        find.case_sensitive = !find.case_sensitive;
+        // Force re-search with new casing flag by clearing last_query.
+        find.last_query.clear();
+        self.kick_off_search(cx);
+        cx.notify();
+    }
+
+    /// VS Code-style find bar, rendered as an absolutely positioned overlay
+    /// anchored to the top-right of the file viewport.
+    fn render_find_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let find = self
+            .find
+            .as_ref()
+            .expect("render_find_bar called without an open find state");
+
+        let has_matches = find.match_count() > 0;
+        let label = find.label();
+        let case_on = find.case_sensitive;
+        let fg = cx.theme().foreground;
+        let muted = cx.theme().muted_foreground;
+        let icon_color = |enabled: bool| if enabled { fg } else { muted };
+
+        div()
+            .absolute()
+            .top(px(6.0))
+            .right(px(20.0))
+            .occlude()
+            .key_context("FindBar")
+            .on_action(cx.listener(|this, _: &FindClose, window, cx| {
+                this.close_find(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindPrev, window, cx| {
+                this.find_prev(window, cx);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .py(px(2.0))
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius)
+                    .shadow_md()
+                    .child(
+                        div().w(px(240.0)).child(
+                            Input::new(&find.query_input)
+                                .border_0()
+                                .xsmall()
+                                .focus_bordered(false)
+                                .suffix(
+                                    Button::new("find-case")
+                                        .icon(
+                                            Icon::new(IconName::CaseSensitive)
+                                                .text_color(icon_color(case_on)),
+                                        )
+                                        .xsmall()
+                                        .compact()
+                                        .ghost()
+                                        .selected(case_on)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_find_case(cx);
+                                        })),
+                                ),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(70.0))
+                            .px_1()
+                            .text_sm()
+                            .text_color(if has_matches { fg } else { muted })
+                            .child(label),
+                    )
+                    .child(
+                        Button::new("find-prev")
+                            .icon(
+                                Icon::new(IconName::ChevronUp).text_color(icon_color(has_matches)),
+                            )
+                            .xsmall()
+                            .ghost()
+                            .disabled(!has_matches)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.find_prev(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("find-next")
+                            .icon(
+                                Icon::new(IconName::ChevronDown)
+                                    .text_color(icon_color(has_matches)),
+                            )
+                            .xsmall()
+                            .ghost()
+                            .disabled(!has_matches)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.find_next(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("find-close")
+                            .icon(Icon::new(IconName::Close).text_color(fg))
+                            .xsmall()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_find(window, cx);
+                            })),
+                    ),
+            )
+    }
+}
+
+/// Split `line` by the matches falling on it, emitting a flat row of spans
+/// where matches are painted with `match_bg` (or `active_bg` for the active
+/// match). Byte offsets that don't land on UTF-8 boundaries or are past the
+/// truncated line length are skipped, still keeping the counter accurate.
+fn render_line_with_matches(
+    line: &str,
+    matches_on_line: &[Match],
+    base_ix: usize,
+    active_ix: Option<usize>,
+    match_bg: Hsla,
+    active_bg: Hsla,
+    active_fg: Hsla,
+) -> AnyElement {
+    let mut row = div().flex().flex_row();
+    let mut cursor: usize = 0;
+    let bytes_len = line.len();
+
+    for (offset_in_group, m) in matches_on_line.iter().enumerate() {
+        let start = m.col;
+        let end = m.col + m.len;
+        if start >= bytes_len {
+            break;
+        }
+        let end = end.min(bytes_len);
+        if !line.is_char_boundary(start) || !line.is_char_boundary(end) {
+            continue;
+        }
+        if start > cursor {
+            let pre = &line[cursor..start];
+            row = row.child(div().child(pre.to_string()));
+        } else if start < cursor {
+            continue;
+        }
+        let slice = &line[start..end];
+        let is_active = active_ix == Some(base_ix + offset_in_group);
+        row = if is_active {
+            row.child(
+                div()
+                    .bg(active_bg)
+                    .text_color(active_fg)
+                    .child(slice.to_string()),
+            )
+        } else {
+            row.child(div().bg(match_bg).child(slice.to_string()))
+        };
+        cursor = end;
+    }
+    if cursor < bytes_len {
+        row = row.child(div().child(line[cursor..].to_string()));
+    }
+    row.into_any_element()
 }
 
 // ─── Render ───────────────────────────────────────────────────────────────────
@@ -263,21 +613,25 @@ impl Render for TextEditor {
             });
 
         // ── Edit / View / Help menus ──────────────────────────────────────────
+        let weak_find = weak.clone();
         let edit_menu = Button::new("edit-menu-btn")
             .label("Edit")
             .ghost()
-            .dropdown_menu(|menu, _, _| {
+            .dropdown_menu(move |menu, _, _| {
+                let w_find = weak_find.clone();
                 menu.item(
                     PopupMenuItem::new("Copy")
                         .icon(IconName::Copy)
                         .disabled(true),
                 )
                 .separator()
-                .item(
-                    PopupMenuItem::new("Find")
-                        .icon(IconName::Search)
-                        .disabled(true),
-                )
+                .item(PopupMenuItem::new("Find").icon(IconName::Search).on_click(
+                    move |_, window, cx| {
+                        w_find
+                            .update(cx, |view, cx| view.open_find(window, cx))
+                            .ok();
+                    },
+                ))
             });
 
         let view_menu = Button::new("view-menu-btn")
@@ -312,6 +666,7 @@ impl Render for TextEditor {
             .flex()
             .flex_row()
             .items_center()
+            .gap_1()
             .px_1()
             .border_b_1()
             .border_color(cx.theme().border)
@@ -413,7 +768,51 @@ impl Render for TextEditor {
                     let num_digits = total_lines.max(1).to_string().len().max(2);
                     let gutter_width = px(num_digits as f32 * 8.5 + 10.0);
 
-                    div()
+                    // ── Find integration ──────────────────────────────────────
+                    //
+                    // Extract everything we need from `self.find` up-front (as
+                    // a plain tuple of owned/cloned values) so that the later
+                    // `self.find.as_mut()` doesn't conflict with a still-live
+                    // immutable borrow.
+                    let (find_open, matches_arc, active_match_line, current_match_ix): (
+                        bool,
+                        Option<Arc<RwLock<Vec<Match>>>>,
+                        Option<u64>,
+                        Option<usize>,
+                    ) = match self.find.as_ref() {
+                        Some(find) if find.tab_index == active => {
+                            let m = Arc::clone(&find.matches);
+                            let active_line = m
+                                .read()
+                                .ok()
+                                .and_then(|r| r.get(find.current).map(|mm| mm.line));
+                            (true, Some(m), active_line, Some(find.current))
+                        }
+                        _ => (false, None, None, None),
+                    };
+
+                    // Scroll to the active match when a navigation just happened.
+                    if let Some(find) = self.find.as_mut() {
+                        if find.tab_index == active && find.pending_scroll {
+                            find.pending_scroll = false;
+                            if let Some(line) = active_match_line {
+                                // A small offset keeps the highlighted line off
+                                // the very top edge of the viewport.
+                                self.tabs[active].scroll_handle.scroll_to_item_strict(
+                                    line.saturating_sub(3) as usize,
+                                    ScrollStrategy::Top,
+                                );
+                            }
+                        }
+                    }
+
+                    // Highlight colors (hard-coded to look correct on both
+                    // themes; theme.warning is too dim on some themes).
+                    let match_bg = rgba(0x5a_4a_00_80); // muted amber
+                    let active_bg = rgba(0xff_9e_00_cc); // strong amber
+                    let active_fg = rgba(0x00_00_00_ff);
+
+                    let content_view = div()
                         .id("content-area")
                         .flex_1()
                         .overflow_hidden()
@@ -441,11 +840,47 @@ impl Render for TextEditor {
                                         range.start as u64,
                                         range.len(),
                                     );
+
+                                    // Pull out just the matches that fall in
+                                    // the rendered line range; binary-searched
+                                    // once per render, then partitioned per line.
+                                    let all_matches_opt =
+                                        matches_arc.as_ref().and_then(|a| a.read().ok());
+
                                     lines
                                         .into_iter()
                                         .enumerate()
                                         .map(|(i, line)| {
                                             let ln = range.start + i + 1;
+                                            let line_no = (range.start + i) as u64;
+
+                                            let line_el: AnyElement = if let Some(all) =
+                                                all_matches_opt.as_deref()
+                                            {
+                                                let on_line =
+                                                    slice_for_line_range(all, line_no, line_no + 1);
+                                                if on_line.is_empty() {
+                                                    div().child(line).into_any_element()
+                                                } else {
+                                                    // Absolute match index into `all` for the
+                                                    // first match on this line (used to tag
+                                                    // the active one).
+                                                    let base_ix =
+                                                        all.partition_point(|m| m.line < line_no);
+                                                    render_line_with_matches(
+                                                        &line,
+                                                        on_line,
+                                                        base_ix,
+                                                        current_match_ix,
+                                                        match_bg.into(),
+                                                        active_bg.into(),
+                                                        active_fg.into(),
+                                                    )
+                                                }
+                                            } else {
+                                                div().child(line).into_any_element()
+                                            };
+
                                             div()
                                                 .flex()
                                                 .flex_row()
@@ -461,7 +896,7 @@ impl Render for TextEditor {
                                                         .text_color(gutter_color)
                                                         .child(format!("{ln}")),
                                                 )
-                                                .child(div().child(line))
+                                                .child(line_el)
                                         })
                                         .collect()
                                 },
@@ -477,8 +912,13 @@ impl Render for TextEditor {
                                 .right_0()
                                 .bottom_0()
                                 .child(Scrollbar::new(&scroll_handle_bar)),
-                        )
-                        .into_any()
+                        );
+
+                    if find_open {
+                        content_view.child(self.render_find_bar(cx)).into_any()
+                    } else {
+                        content_view.into_any()
+                    }
                 }
             }
         };
@@ -539,6 +979,7 @@ impl Render for TextEditor {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
             .child(menu_bar)
             .child(tab_bar)
             .child(content)
@@ -549,10 +990,18 @@ impl Render for TextEditor {
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 fn main() {
-    let app = Application::new();
+    let app = Application::new().with_assets(Assets);
 
     app.run(move |cx| {
         gpui_component::init(cx);
+
+        cx.bind_keys([
+            KeyBinding::new("ctrl-f", Find, None),
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-f", Find, None),
+            KeyBinding::new("escape", FindClose, Some("FindBar")),
+            KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
+        ]);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
