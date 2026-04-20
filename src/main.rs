@@ -281,7 +281,23 @@ impl TextEditor {
     }
 
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find.take().is_some() {
+        if let Some(mut find) = self.find.take() {
+            // Actively release the matches allocation. The `Arc` can still be
+            // held by the previous frame's `uniform_list` closure and by any
+            // in-flight background search, so just dropping `FindState` would
+            // keep up to ~24 MB (MAX_MATCHES × size_of::<Match>) resident
+            // until those clones go away. Replacing the inner `Vec` with an
+            // empty one frees that capacity immediately.
+            if let Ok(mut w) = find.matches.write() {
+                *w = Vec::new();
+            }
+            // Bump the generation so any racing background search that's
+            // already produced a result refuses to write it back.
+            find.search_gen = find.search_gen.wrapping_add(1);
+            // Cancel the in-flight task now (Drop cancels it); doing this
+            // before `find` itself drops makes the intent explicit.
+            find._search_task = None;
+            drop(find);
             // Return focus to the file viewport so keyboard scrolling works again.
             self.focus_handle.focus(window);
             cx.notify();
@@ -312,8 +328,10 @@ impl TextEditor {
         let results_arc = Arc::clone(&find.matches);
 
         if query.is_empty() {
+            // Replace (don't `clear`) so we return the backing allocation to
+            // the allocator instead of keeping ~24 MB of capacity around.
             if let Ok(mut w) = results_arc.write() {
-                w.clear();
+                *w = Vec::new();
             }
             find.current = 0;
             find._search_task = None;
@@ -330,6 +348,8 @@ impl TextEditor {
             let Some(entity) = weak.upgrade() else { return };
             let _ = cx.update_entity(&entity, |this, cx| {
                 let Some(find) = this.find.as_mut() else {
+                    // Find was closed while we were searching; let `results`
+                    // drop here so the large vector is freed promptly.
                     return;
                 };
                 if find.search_gen != current_gen {

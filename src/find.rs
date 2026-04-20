@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 /// Hard cap on matches to keep rendering responsive on pathological queries
 /// (e.g. searching for " " in a multi-GB log file).
-pub const MAX_MATCHES: usize = 200_000;
+pub const MAX_MATCHES: usize = 1_000_000;
 
 /// A single match's position, sorted ascending by `(line, col)` alongside
 /// other matches in [`FindState::matches`].
@@ -59,6 +59,10 @@ impl FindState {
 /// triples sorted by position. Scanning is done with SIMD byte search; line
 /// numbers are accumulated in a single forward pass over the newline-to-match
 /// prefixes.
+///
+/// Match positions are folded into `Match` records as they are produced,
+/// so peak memory is bounded by the output vector alone (no intermediate
+/// `Vec<usize>` of byte offsets).
 pub fn search_in_mmap(mmap: &Mmap, query: &str, case_insensitive: bool) -> Vec<Match> {
     if query.is_empty() {
         return Vec::new();
@@ -69,37 +73,46 @@ pub fn search_in_mmap(mmap: &Mmap, query: &str, case_insensitive: bool) -> Vec<M
         return Vec::new();
     }
 
-    let positions: Vec<usize> = if case_insensitive {
-        find_all_ascii_ci(data, needle, MAX_MATCHES)
-    } else {
-        memchr::memmem::find_iter(data, needle)
-            .take(MAX_MATCHES)
-            .collect()
-    };
-
-    let mut out = Vec::with_capacity(positions.len());
+    let mut out: Vec<Match> = Vec::new();
     let mut line: u64 = 0;
     let mut line_start: usize = 0;
     let mut scan: usize = 0;
-    for pos in positions {
-        while scan < pos {
-            match memchr::memchr(b'\n', &data[scan..pos]) {
+
+    let push_match = |pos: usize,
+                      line: &mut u64,
+                      line_start: &mut usize,
+                      scan: &mut usize,
+                      out: &mut Vec<Match>| {
+        while *scan < pos {
+            match memchr::memchr(b'\n', &data[*scan..pos]) {
                 Some(off) => {
-                    line += 1;
-                    line_start = scan + off + 1;
-                    scan = line_start;
+                    *line += 1;
+                    *line_start = *scan + off + 1;
+                    *scan = *line_start;
                 }
                 None => {
-                    scan = pos;
+                    *scan = pos;
                 }
             }
         }
         out.push(Match {
-            line,
-            col: pos - line_start,
+            line: *line,
+            col: pos - *line_start,
             len: needle.len(),
         });
+    };
+
+    if case_insensitive {
+        find_all_ascii_ci(data, needle, MAX_MATCHES, |pos| {
+            push_match(pos, &mut line, &mut line_start, &mut scan, &mut out);
+        });
+    } else {
+        for pos in memchr::memmem::find_iter(data, needle).take(MAX_MATCHES) {
+            push_match(pos, &mut line, &mut line_start, &mut scan, &mut out);
+        }
     }
+
+    out.shrink_to_fit();
     out
 }
 
@@ -109,15 +122,23 @@ pub fn search_in_mmap(mmap: &Mmap, query: &str, case_insensitive: bool) -> Vec<M
 /// (the first byte in either case), then verifies each window with
 /// `eq_ignore_ascii_case`. Non-ASCII bytes in the needle/haystack compare
 /// byte-exact, which matches the behavior callers document to users.
-fn find_all_ascii_ci(haystack: &[u8], needle: &[u8], max_matches: usize) -> Vec<usize> {
-    let mut out = Vec::new();
+///
+/// Streams matches into `sink` instead of collecting into a `Vec<usize>`,
+/// so it adds no per-match heap allocation on top of what the caller does.
+fn find_all_ascii_ci(
+    haystack: &[u8],
+    needle: &[u8],
+    max_matches: usize,
+    mut sink: impl FnMut(usize),
+) {
     if needle.is_empty() || haystack.len() < needle.len() {
-        return out;
+        return;
     }
     let first_lo = needle[0].to_ascii_lowercase();
     let first_up = needle[0].to_ascii_uppercase();
     let mut start = 0;
-    while start + needle.len() <= haystack.len() && out.len() < max_matches {
+    let mut count = 0;
+    while start + needle.len() <= haystack.len() && count < max_matches {
         let rem = &haystack[start..];
         let found = if first_lo == first_up {
             memchr::memchr(first_lo, rem)
@@ -136,14 +157,14 @@ fn find_all_ascii_ci(haystack: &[u8], needle: &[u8], max_matches: usize) -> Vec<
                     .zip(needle)
                     .all(|(a, b)| a.eq_ignore_ascii_case(b))
                 {
-                    out.push(pos);
+                    sink(pos);
+                    count += 1;
                 }
                 start = pos + 1;
             }
             None => break,
         }
     }
-    out
 }
 
 /// Find the slice of `matches` whose `line` falls in `[start_line, end_line)`.
