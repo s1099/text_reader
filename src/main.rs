@@ -14,7 +14,7 @@ use viewer::{MappedFile, get_lines};
 // ─── Tab state ────────────────────────────────────────────────────────────────
 
 enum TabContent {
-    Welcome,
+    Scratch,
     File(MappedFile),
     Error(String),
 }
@@ -43,14 +43,36 @@ impl TextEditor {
         Self {
             focus_handle: cx.focus_handle(),
             tabs: vec![TabEntry {
-                title: "Welcome".to_string(),
-                content: TabContent::Welcome,
+                title: "Untitled".to_string(),
+                content: TabContent::Scratch,
                 scroll_handle: UniformListScrollHandle::new(),
-                needs_focus: false,
+                needs_focus: true,
             }],
             active_tab: 0,
             _tasks: vec![],
         }
+    }
+
+    fn new_scratch_tab(&mut self, cx: &mut Context<Self>) {
+        let n = self
+            .tabs
+            .iter()
+            .filter(|t| matches!(t.content, TabContent::Scratch))
+            .count()
+            + 1;
+        let title = if n == 1 {
+            "Untitled".to_string()
+        } else {
+            format!("Untitled {n}")
+        };
+        self.tabs.push(TabEntry {
+            title,
+            content: TabContent::Scratch,
+            scroll_handle: UniformListScrollHandle::new(),
+            needs_focus: true,
+        });
+        self.active_tab = self.tabs.len() - 1;
+        cx.notify();
     }
 
     // ── Scroll helpers ────────────────────────────────────────────────────────
@@ -156,15 +178,24 @@ impl TextEditor {
     }
 
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.tabs.len() > 1 {
-            self.tabs.remove(index);
-            if self.active_tab == index {
-                self.active_tab = self.active_tab.min(self.tabs.len() - 1);
-            } else if self.active_tab > index {
-                self.active_tab -= 1;
-            }
-            cx.notify();
+        if index >= self.tabs.len() {
+            return;
         }
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.tabs.push(TabEntry {
+                title: "Untitled".to_string(),
+                content: TabContent::Scratch,
+                scroll_handle: UniformListScrollHandle::new(),
+                needs_focus: true,
+            });
+            self.active_tab = 0;
+        } else if self.active_tab == index {
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        } else if self.active_tab > index {
+            self.active_tab -= 1;
+        }
+        cx.notify();
     }
 }
 
@@ -206,15 +237,7 @@ impl Render for TextEditor {
                     move |_, _, cx| {
                         w_new
                             .update(cx, |view, cx| {
-                                let idx = view.tabs.len() + 1;
-                                view.tabs.push(TabEntry {
-                                    title: format!("Untitled {idx}"),
-                                    content: TabContent::Welcome,
-                                    scroll_handle: UniformListScrollHandle::new(),
-                                    needs_focus: false,
-                                });
-                                view.active_tab = view.tabs.len() - 1;
-                                cx.notify();
+                                view.new_scratch_tab(cx);
                             })
                             .ok();
                     },
@@ -335,41 +358,35 @@ impl Render for TextEditor {
         let content: AnyElement = {
             let tab = &self.tabs[active];
             match &tab.content {
-                TabContent::Welcome => div()
-                    .flex_1()
-                    .p_8()
-                    .font_family("monospace")
-                    .text_sm()
-                    .text_color(cx.theme().foreground)
-                    .child(
-                        div()
-                            .mb_4()
-                            .text_xl()
-                            .font_weight(FontWeight::BOLD)
-                            .child("File Viewer"),
-                    )
-                    .child(div().child("Open file with File → Open File…").mb_2())
-                    .child(
-                        div()
-                            .child("• Files of any size are supported via memory-mapping")
-                            .mb_1(),
-                    )
-                    .child(
-                        div()
-                            .child("• A sparse line index is built in the background")
-                            .mb_1(),
-                    )
-                    .child(
-                        div()
-                            .child("• Only the visible lines are ever decoded")
-                            .mb_1(),
-                    )
-                    .child(
-                        div()
-                            .child("• Arrow / Page-Up/Dn / Home / End to navigate (broken)")
-                            .mb_1(),
-                    )
-                    .into_any(),
+                TabContent::Scratch => {
+                    let mut gutter_color = cx.theme().foreground;
+                    gutter_color.a *= 0.4;
+                    let gutter_width = px(2.0 * 8.5 + 10.0);
+
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .track_focus(&self.focus_handle)
+                        .bg(cx.theme().background)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .font_family("monospace")
+                                .text_sm()
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .w(gutter_width)
+                                        .pr_3()
+                                        .text_right()
+                                        .text_color(gutter_color)
+                                        .child("1"),
+                                )
+                                .child(div()),
+                        )
+                        .into_any()
+                }
 
                 TabContent::Error(msg) => {
                     let msg = msg.clone();
@@ -496,7 +513,7 @@ impl Render for TextEditor {
                         )
                     }
                 }
-                TabContent::Welcome => "File Viewer | open a file to begin".to_string(),
+                TabContent::Scratch => format!("{}  │  Ln 1  /  1", tab.title),
                 TabContent::Error(_) => "Error".to_string(),
             }
         };
