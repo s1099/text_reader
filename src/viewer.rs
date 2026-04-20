@@ -41,8 +41,6 @@ impl SparseIndex {
     }
 }
 
-// ─── Memory-mapped file ───────────────────────────────────────────────────────
-
 pub struct MappedFile {
     pub path: PathBuf,
     pub mmap: Arc<Mmap>,
