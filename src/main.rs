@@ -304,8 +304,10 @@ impl TextEditor {
         }
     }
 
-    /// Spawn a background search for the current query/case flag. Previous
-    /// task (if any) is dropped, and stale completions are filtered using
+    /// Spawn a background search for the current query/case flag. The task
+    /// waits 500 ms before running so rapid keystrokes coalesce into a single
+    /// search; each new call drops the previous task, cancelling its timer.
+    /// Stale completions that still make it through are filtered using
     /// `search_gen`.
     fn kick_off_search(&mut self, cx: &mut Context<Self>) {
         let Some(find) = self.find.as_mut() else {
@@ -340,6 +342,9 @@ impl TextEditor {
         }
 
         let task = cx.spawn(async move |weak, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
             let results = cx
                 .background_executor()
                 .spawn(async move { search_in_mmap(&mmap, &query, case_insensitive) })
