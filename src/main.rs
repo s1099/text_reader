@@ -6,7 +6,7 @@ use gpui::*;
 use gpui_component::Root;
 use gpui_component_assets::Assets;
 
-use text_editor::{Find, FindClose, FindPrev, TextEditor};
+use text_reader::{Find, FindClose, FindPrev, TextEditor};
 
 fn main() {
     let app = Application::new().with_assets(Assets);

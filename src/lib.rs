@@ -1,4 +1,4 @@
-//! Library crate root for the `text_editor` binary.
+//! Library crate root for the `text_reader` binary.
 //!
 //! Modules are split by concern; see each module for details. The actions
 //! defined here are re-exported so both the binary (`src/main.rs`) and the
@@ -13,6 +13,6 @@ pub mod render;
 pub mod util;
 pub mod viewer;
 
-actions!(text_editor, [Find, FindClose, FindPrev]);
+actions!(text_reader, [Find, FindClose, FindPrev]);
 
 pub use editor::{TabContent, TabEntry, TextEditor};
