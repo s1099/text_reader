@@ -9,6 +9,9 @@ Tested with text file consisting of 1 Million lines (~9GB), used close to 20MB o
 Make sure to have [rust installed](https://rustup.rs/)
 
 ```bash
+cargo build --release
+
+# or to build and run
 cargo run --release
 ```
 Build will be in `target/release/`
