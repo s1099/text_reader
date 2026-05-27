@@ -25,7 +25,7 @@ pub struct TabEntry {
     pub(crate) needs_focus: bool,
 }
 
-// ─── Main view ────────────────────────────────────────────────────────────────
+// Main view 
 
 pub struct TextEditor {
     pub(crate) focus_handle: FocusHandle,
@@ -35,6 +35,8 @@ pub struct TextEditor {
     pub(crate) find: Option<FindState>,
     /// Background tasks must be held alive (dropping a Task cancels it).
     pub(crate) _tasks: Vec<Task<()>>,
+    /// Current font size in pixels; adjusted by zoom in/out.
+    pub(crate) font_size: f32,
 }
 
 impl TextEditor {
@@ -50,7 +52,20 @@ impl TextEditor {
             active_tab: 0,
             find: None,
             _tasks: vec![],
+            font_size: 13.0,
         }
+    }
+
+    // Zoom helpers
+
+    pub(crate) fn zoom_in(&mut self, cx: &mut Context<Self>) {
+        self.font_size = (self.font_size + 1.0).min(48.0);
+        cx.notify();
+    }
+
+    pub(crate) fn zoom_out(&mut self, cx: &mut Context<Self>) {
+        self.font_size = (self.font_size - 1.0).max(8.0);
+        cx.notify();
     }
 
     pub(crate) fn new_scratch_tab(&mut self, cx: &mut Context<Self>) {
@@ -75,7 +90,7 @@ impl TextEditor {
         cx.notify();
     }
 
-    // ── Scroll helpers ────────────────────────────────────────────────────────
+    // Scroll helpers 
 
     /// Scroll the active file tab by `delta` lines (positive = down).
     pub(crate) fn scroll_lines(&mut self, delta: i64, cx: &mut Context<Self>) {

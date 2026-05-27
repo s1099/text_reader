@@ -13,6 +13,6 @@ pub mod render;
 pub mod util;
 pub mod viewer;
 
-actions!(text_reader, [Find, FindClose, FindPrev]);
+actions!(text_reader, [Find, FindClose, FindPrev, ZoomIn, ZoomOut]);
 
 pub use editor::{TabContent, TabEntry, TextEditor};

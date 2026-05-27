@@ -6,7 +6,7 @@ use gpui::*;
 use gpui_component::Root;
 use gpui_component_assets::Assets;
 
-use text_reader::{Find, FindClose, FindPrev, TextEditor};
+use text_reader::{Find, FindClose, FindPrev, TextEditor, ZoomIn, ZoomOut};
 
 fn main() {
     let app = Application::new().with_assets(Assets);
@@ -20,12 +20,18 @@ fn main() {
             KeyBinding::new("cmd-f", Find, None),
             KeyBinding::new("escape", FindClose, Some("FindBar")),
             KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
+            KeyBinding::new("ctrl-=", ZoomIn, None),
+            KeyBinding::new("ctrl--", ZoomOut, None),
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-=", ZoomIn, None),
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd--", ZoomOut, None),
         ]);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: point(px(200.0), px(100.0)),
+                    origin: point(px(100.0), px(100.0)),
                     size: size(px(1280.0), px(800.0)),
                 })),
                 ..WindowOptions::default()

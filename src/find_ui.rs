@@ -13,10 +13,8 @@ use crate::find::{FindState, Match, search_in_mmap};
 use crate::{FindClose, FindPrev};
 
 impl TextEditor {
-    // ── Find feature ──────────────────────────────────────────────────────────
-
     /// Ctrl+F: toggle the find bar for the active tab.
-    ///
+    /// TODO: add in hotkey settings
     /// If already open and bound to this tab, just refocus the input and
     /// select its contents (matches VS Code's behavior on repeated Ctrl+F).
     pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {

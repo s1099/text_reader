@@ -8,8 +8,6 @@ pub const SPARSE_STRIDE: u64 = 10_000;
 /// Maximum bytes decoded per line for display (lines longer than this get truncated).
 const MAX_LINE_BYTES: usize = 4 * 1024;
 
-// ─── Sparse index ────────────────────────────────────────────────────────────
-
 /// Sparse byte-offset index over newline positions.
 ///
 /// `entries[i]` = byte offset of the first byte of line `(i * SPARSE_STRIDE)`.
@@ -96,8 +94,6 @@ impl MappedFile {
     }
 }
 
-// ─── Line fetcher ─────────────────────────────────────────────────────────────
-
 /// Fetch `count` consecutive lines starting at zero-based line `start`.
 ///
 /// Uses the sparse index to seek close to `start`, then scans forward
@@ -152,8 +148,6 @@ pub fn get_lines(
 
     lines
 }
-
-// ─── Index builder (background thread) ───────────────────────────────────────
 
 fn build_sparse_index(mmap: Arc<Mmap>, index: Arc<RwLock<SparseIndex>>) {
     let data: &[u8] = &mmap;

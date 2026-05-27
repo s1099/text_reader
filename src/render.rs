@@ -15,7 +15,7 @@ use crate::find::{Match, slice_for_line_range};
 use crate::find_ui::render_line_with_matches;
 use crate::util::{format_file_size, format_number};
 use crate::viewer::get_lines;
-use crate::Find;
+use crate::{Find, ZoomIn, ZoomOut};
 
 impl Render for TextEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -99,19 +99,27 @@ impl Render for TextEditor {
                 ))
             });
 
+        let weak_zoom_in = weak.clone();
+        let weak_zoom_out = weak.clone();
         let view_menu = Button::new("view-menu-btn")
             .label("View")
             .ghost()
-            .dropdown_menu(|menu, _, _| {
+            .dropdown_menu(move |menu, _, _| {
+                let w_in = weak_zoom_in.clone();
+                let w_out = weak_zoom_out.clone();
                 menu.item(
                     PopupMenuItem::new("Zoom In")
                         .icon(IconName::Plus)
-                        .disabled(true),
+                        .on_click(move |_, _, cx| {
+                            w_in.update(cx, |view, cx| view.zoom_in(cx)).ok();
+                        }),
                 )
                 .item(
                     PopupMenuItem::new("Zoom Out")
                         .icon(IconName::Minus)
-                        .disabled(true),
+                        .on_click(move |_, _, cx| {
+                            w_out.update(cx, |view, cx| view.zoom_out(cx)).ok();
+                        }),
                 )
             });
 
@@ -178,7 +186,9 @@ impl Render for TextEditor {
                 TabContent::Scratch => {
                     let mut gutter_color = cx.theme().foreground;
                     gutter_color.a *= 0.4;
-                    let gutter_width = px(2.0 * 8.5 + 10.0);
+                    let font_size = px(self.font_size);
+                    let char_width = self.font_size * 0.65;
+                    let gutter_width = px(2.0 * char_width + 10.0);
 
                     div()
                         .flex_1()
@@ -190,7 +200,7 @@ impl Render for TextEditor {
                                 .flex()
                                 .flex_row()
                                 .font_family("monospace")
-                                .text_sm()
+                                .text_size(font_size)
                                 .child(
                                     div()
                                         .flex_shrink_0()
@@ -228,7 +238,9 @@ impl Render for TextEditor {
                     gutter_color.a *= 0.4;
 
                     let num_digits = total_lines.max(1).to_string().len().max(2);
-                    let gutter_width = px(num_digits as f32 * 8.5 + 10.0);
+                    let char_width = self.font_size * 0.65;
+                    let gutter_width = px(num_digits as f32 * char_width + 10.0);
+                    let font_size = px(self.font_size);
 
                     // Extract everything we need from `self.find` up-front (as
                     // a plain tuple of owned/cloned values) so that the later
@@ -345,7 +357,7 @@ impl Render for TextEditor {
                                                 .flex()
                                                 .flex_row()
                                                 .font_family("monospace")
-                                                .text_sm()
+                                                .text_size(font_size)
                                                 .whitespace_nowrap()
                                                 .child(
                                                     div()
@@ -440,6 +452,8 @@ impl Render for TextEditor {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, _window, cx| this.zoom_in(cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _window, cx| this.zoom_out(cx)))
             .child(menu_bar)
             .child(tab_bar)
             .child(content)
