@@ -90,52 +90,7 @@ impl TextEditor {
         cx.notify();
     }
 
-    // Scroll helpers 
 
-    /// Scroll the active file tab by `delta` lines (positive = down).
-    pub(crate) fn scroll_lines(&mut self, delta: i64, cx: &mut Context<Self>) {
-        let active = self.active_tab;
-        let (current_top, total) = {
-            let tab = &self.tabs[active];
-            match &tab.content {
-                TabContent::File(mf) => {
-                    let top = tab.scroll_handle.0.borrow().base_handle.top_item() as i64;
-                    let total = mf.total_lines() as i64;
-                    (top, total)
-                }
-                _ => return,
-            }
-        };
-        let new_top = (current_top + delta).max(0).min(total.saturating_sub(1)) as usize;
-        self.tabs[active]
-            .scroll_handle
-            .scroll_to_item_strict(new_top, ScrollStrategy::Top);
-        cx.notify();
-    }
-
-    pub(crate) fn scroll_to_start(&mut self, cx: &mut Context<Self>) {
-        let active = self.active_tab;
-        if matches!(self.tabs[active].content, TabContent::File(_)) {
-            self.tabs[active]
-                .scroll_handle
-                .scroll_to_item_strict(0, ScrollStrategy::Top);
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
-        let active = self.active_tab;
-        let total = match &self.tabs[active].content {
-            TabContent::File(mf) => mf.total_lines() as usize,
-            _ => return,
-        };
-        self.tabs[active]
-            .scroll_handle
-            .scroll_to_item_strict(total.saturating_sub(1), ScrollStrategy::Bottom);
-        cx.notify();
-    }
-
-    // ── File opening ──────────────────────────────────────────────────────────
 
     pub(crate) fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let title = path
